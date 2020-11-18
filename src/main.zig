@@ -6,6 +6,8 @@
 const std = @import("std");
 const printf = std.debug.print;
 const fs = std.fs;
+const os = std.os;
+const math = std.math;
 
 const dev = @import("./dev.zig");
 
@@ -19,11 +21,33 @@ pub fn main() !void {
     };
     defer file.close();
 
-    var fdev = try dev.FileDevice.init("tun0", file);
-    fdev.device().print();
+    const network = os.sockaddr_in{
+        .family = os.AF_INET,
+        .port = 0,
+        .addr = 0,
+    };
+
+    const netmask = os.sockaddr_in{
+        .family = os.AF_INET,
+        .port = 0,
+        .addr = math.maxInt(u32),
+    };
+
+    const address = os.sockaddr_in{
+        .family = os.AF_INET,
+        .port = 0,
+        .addr = 1,
+    };
+
+    var fdev = try dev.TunDevice.init(
+        "tun0",
+        file,
+        @ptrCast(*const os.sockaddr, &network),
+        @ptrCast(*const os.sockaddr, &netmask),
+        @ptrCast(*const os.sockaddr, &address),
+    );
 
     var buf: [1024]u8 = undefined;
-
     while (true) {
         const poll = fdev.poll(500000) catch |err| {
             printf("Poll err {}\n", .{err});
