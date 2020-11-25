@@ -19,12 +19,14 @@ const c = @cImport({
 const Error = error{
     Create,
     Read,
+    IfConfig,
 };
 
 pub fn Device(
     comptime Context: type,
+    comptime nameFn: fn (context: Context) []const u8,
     comptime getFd: fn (context: Context) i32,
-    comptime routeFn: fn (context: Context) Error!void,
+    comptime routeFn: fn (name: []const u8, info: IfRouteInfo) Error!void,
     comptime closeFn: fn (context: Context) void,
 ) type {
     return struct {
@@ -32,19 +34,24 @@ pub fn Device(
 
         const Self = @This();
 
+        /// Returns the name of the interface.
+        pub fn name(self: Self) []const u8 {
+            return nameFn(self.context);
+        }
+
         /// Return a file descriptor for the already configured device.
-        pub fn fd(self: Context) i32 {
-            return getFd(self);
+        pub fn fd(self: Self) i32 {
+            return getFd(self.context);
         }
 
         /// Route the device for the system.
-        pub fn route(self: Context) Error!void {
-            return routeFn(self);
+        pub fn route(self: Self, info: IfRouteInfo) Error!void {
+            return routeFn(nameFn(self.context), info);
         }
 
         // Finalizes and closes the device, undoing all of it's configuration.
-        pub fn close(self: Context) void {
-            close(self);
+        pub fn close(self: Self) void {
+            closeFn(self.context);
         }
     };
 }
@@ -55,36 +62,28 @@ pub const TunDevice = struct {
 
     const Self = @This();
     const Reader = io.Reader(*Self, Error, read);
-    const Device = Device(*Self, getFd, virtIfRoute, close);
+    const Dev = Device(*Self, name, getFd, virtIfRoute, close);
 
     /// Creates, initializes and configures a virtual TUN device
     /// with a given name, clone file device descriptor, network,
     /// netmask and a concrete IP address.
     pub fn init(
-        name: []const u8,
+        deviceName: []const u8,
         file: fs.File,
-        network: *const os.sockaddr,
-        netmask: *const os.sockaddr,
-        address: *const os.sockaddr,
     ) !Self {
         var ifr_name = [_]u8{0} ** c.IFNAMSIZ;
-        mem.copy(u8, ifr_name[0..c.IFNAMSIZ], name[0..]);
+        mem.copy(u8, ifr_name[0..c.IFNAMSIZ], deviceName[0..]);
 
-        const ifr = c.ifreq{
-            .ifr_ifrn = .{
-                .ifrn_name = ifr_name,
+        const ifr = os.linux.ifreq{
+            .ifrn = .{
+                .name = ifr_name,
             },
-            .ifr_ifru = .{
-                .ifru_flags = c.IFF_TUN,
+            .ifru = .{
+                .flags = c.IFF_TUN,
             },
         };
 
-        const errno = os.linux.ioctl(
-            file.handle,
-            c.TUNSETIFF,
-            @ptrToInt(&ifr),
-        );
-
+        const errno = os.linux.ioctl(file.handle, c.TUNSETIFF, @ptrToInt(&ifr));
         if (errno != 0) {
             return error.Create;
         }
@@ -93,13 +92,18 @@ pub const TunDevice = struct {
         const fcntlRet = try os.fcntl(file.handle, os.F_SETFL, flag | os.O_NONBLOCK);
 
         return Self{
-            .name = name,
+            .name = deviceName,
             .file = file,
         };
     }
 
-    pub fn device(self: *Self) Device {
+    pub fn device(self: *Self) Dev {
         return .{ .context = self };
+    }
+
+    /// Get the name of the interface.
+    fn name(self: *Self) []const u8 {
+        return self.name;
     }
 
     // Returns the file device.
@@ -133,5 +137,42 @@ pub const TunDevice = struct {
     }
 };
 
+/// Contains all the nescesary information to configure a network interface.
+pub const IfRouteInfo = struct {
+    address: os.sockaddr,
+    netmask: os.sockaddr,
+};
+
 /// Prototype for the device router.
-fn virtIfRoute(comptime context: Context) void {}
+fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
+    var ifr_name = [_]u8{0} ** c.IFNAMSIZ;
+    mem.copy(u8, ifr_name[0..c.IFNAMSIZ], name[0..]);
+
+    var ifr = os.linux.ifreq{
+        .ifrn = .{
+            .name = ifr_name,
+        },
+        .ifru = .{
+            .addr = info.address,
+        },
+    };
+
+    var errno = os.system.ioctl(c.AF_INET, c.SIOCSIFADDR, @ptrToInt(&ifr));
+    if (errno != 0) {
+        return error.IfConfig;
+    }
+
+    ifr = os.linux.ifreq{
+        .ifrn = .{
+            .name = ifr_name,
+        },
+        .ifru = .{
+            .addr = info.netmask,
+        },
+    };
+
+    errno = os.system.ioctl(c.AF_INET, c.SIOCSIFNETMASK, @ptrToInt(&ifr));
+    if (errno != 0) {
+        return error.IfConfig;
+    }
+}

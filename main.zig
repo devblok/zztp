@@ -37,11 +37,16 @@ pub fn main() !void {
     };
     defer file.close();
 
-    const network = try Address.parseIp("172.1.0.0", 0);
+    var fdev = try dev.TunDevice.init("tun0", file);
+
     const netmask = try Address.parseIp("255.255.255.0", 0);
     const address = try Address.parseIp("172.1.0.1", 0);
+    const routeInfo = dev.IfRouteInfo{
+        .address = address.any,
+        .netmask = netmask.any,
+    };
 
-    var fdev = try dev.TunDevice.init("tun0", file, &network.any, &netmask.any, &address.any);
+    try fdev.device().route(routeInfo);
 
     var buf: [1024]u8 = undefined;
     while (true) {
