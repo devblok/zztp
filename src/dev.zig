@@ -197,4 +197,26 @@ fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
         os.ENODEV => unreachable,
         else => return error.IfConfig,
     }
+
+    ifr = os.linux.ifreq{
+        .ifrn = .{
+            .name = ifr_name,
+        },
+        .ifru = .{
+            .flags = 1 | c.IFF_UP,
+        },
+    };
+
+    switch (os.errno(os.system.ioctl(fd, c.SIOCSIFFLAGS, @ptrToInt(&ifr)))) {
+        0 => {},
+        os.EBADF => unreachable,
+        os.EFAULT => unreachable,
+        os.EINVAL => unreachable,
+        os.ENOTTY => unreachable,
+        os.ENXIO => unreachable,
+        os.EINTR => unreachable,
+        os.EIO => unreachable,
+        os.ENODEV => unreachable,
+        else => return error.IfConfig,
+    }
 }
