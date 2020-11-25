@@ -20,6 +20,7 @@ const Error = error{
     Create,
     Read,
     IfConfig,
+    GetInet,
 };
 
 pub fn Device(
@@ -145,6 +146,11 @@ pub const IfRouteInfo = struct {
 
 /// Prototype for the device router.
 fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
+    const flags = os.SOCK_DGRAM | os.SOCK_CLOEXEC | os.SOCK_NONBLOCK;
+    const fd = os.socket(os.AF_INET, flags, 0) catch |err| {
+        return error.GetInet;
+    };
+
     var ifr_name = [_]u8{0} ** c.IFNAMSIZ;
     mem.copy(u8, ifr_name[0..c.IFNAMSIZ], name[0..]);
 
@@ -157,9 +163,17 @@ fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
         },
     };
 
-    var errno = os.system.ioctl(c.AF_INET, c.SIOCSIFADDR, @ptrToInt(&ifr));
-    if (errno != 0) {
-        return error.IfConfig;
+    switch (os.errno(os.system.ioctl(fd, c.SIOCSIFADDR, @ptrToInt(&ifr)))) {
+        0 => {},
+        os.EBADF => unreachable,
+        os.EFAULT => unreachable,
+        os.EINVAL => unreachable,
+        os.ENOTTY => unreachable,
+        os.ENXIO => unreachable,
+        os.EINTR => unreachable,
+        os.EIO => unreachable,
+        os.ENODEV => unreachable,
+        else => return error.IfConfig,
     }
 
     ifr = os.linux.ifreq{
@@ -171,8 +185,16 @@ fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
         },
     };
 
-    errno = os.system.ioctl(c.AF_INET, c.SIOCSIFNETMASK, @ptrToInt(&ifr));
-    if (errno != 0) {
-        return error.IfConfig;
+    switch (os.errno(os.system.ioctl(fd, c.SIOCSIFNETMASK, @ptrToInt(&ifr)))) {
+        0 => {},
+        os.EBADF => unreachable,
+        os.EFAULT => unreachable,
+        os.EINVAL => unreachable,
+        os.ENOTTY => unreachable,
+        os.ENXIO => unreachable,
+        os.EINTR => unreachable,
+        os.EIO => unreachable,
+        os.ENODEV => unreachable,
+        else => return error.IfConfig,
     }
 }
