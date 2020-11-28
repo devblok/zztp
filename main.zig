@@ -16,9 +16,11 @@ const clap = @import("./extern/zig-clap/clap.zig");
 
 pub fn main() !void {
     const params = comptime [_]clap.Param(clap.Help){
+        clap.parseParam("-h, --help             Display this help and exit.") catch unreachable,
         clap.parseParam("-n, --network <IP4>    Network in which the interface will operate.") catch unreachable,
         clap.parseParam("-m, --netmask <IP4>    Netmask for the interface.") catch unreachable,
         clap.parseParam("-a, --address <IP4>    Address of this machine.") catch unreachable,
+        clap.parseParam("<POS>...") catch unreachable,
     };
 
     var diag: clap.Diagnostic = undefined;
@@ -27,6 +29,11 @@ pub fn main() !void {
         return err;
     };
     defer args.deinit();
+
+    if (args.flag("--help")) {
+        try clap.help(std.io.getStdErr().outStream(), &params);
+        return;
+    }
 
     const file = fs.cwd().openFile(
         "/dev/net/tun",
@@ -39,8 +46,24 @@ pub fn main() !void {
 
     var fdev = try dev.TunDevice.init("tun0", file);
 
-    const netmask = try Address.parseIp("255.255.255.0", 0);
-    const address = try Address.parseIp("172.1.0.1", 0);
+    var addressArg: []const u8 = undefined;
+    if (args.option("--address")) |addr| {
+        addressArg = addr;
+    } else {
+        printf("Address option is missing\n", .{});
+        return;
+    }
+
+    var netmaskArg: []const u8 = undefined;
+    if (args.option("--netmask")) |mask| {
+        netmaskArg = mask;
+    } else {
+        printf("Netmask option is missing\n", .{});
+        return;
+    }
+
+    const netmask = try Address.parseIp(netmaskArg, 0);
+    const address = try Address.parseIp(addressArg, 0);
     const routeInfo = dev.IfConfigInfo{
         .address = address.any,
         .netmask = netmask.any,

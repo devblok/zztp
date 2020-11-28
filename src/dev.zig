@@ -21,6 +21,8 @@ const Error = error{
     Read,
     IfConfig,
     GetInet,
+    DeviceGone,
+    BadDevice,
 };
 
 pub fn Device(
@@ -144,7 +146,7 @@ pub const IfConfigInfo = struct {
     netmask: os.sockaddr,
 };
 
-/// Prototype for the device router.
+/// Configures and ups the virtual network interface.
 fn virtifcfg(name: []const u8, info: IfConfigInfo) Error!void {
     const flags = os.SOCK_DGRAM | os.SOCK_CLOEXEC | os.SOCK_NONBLOCK;
     const fd = os.socket(os.AF_INET, flags, 0) catch |err| {
@@ -154,44 +156,41 @@ fn virtifcfg(name: []const u8, info: IfConfigInfo) Error!void {
     var ifr_name = [_]u8{0} ** c.IFNAMSIZ;
     mem.copy(u8, ifr_name[0..c.IFNAMSIZ], name[0..]);
 
-    var ifr = os.linux.ifreq{
+    try doIoctl(fd, c.SIOCSIFADDR, @ptrToInt(&os.linux.ifreq{
         .ifrn = .{
             .name = ifr_name,
         },
         .ifru = .{
             .addr = info.address,
         },
-    };
-    try doIoctl(fd, c.SIOCSIFADDR, @ptrToInt(&ifr));
+    }));
 
-    ifr = os.linux.ifreq{
+    try doIoctl(fd, c.SIOCSIFNETMASK, @ptrToInt(&os.linux.ifreq{
         .ifrn = .{
             .name = ifr_name,
         },
         .ifru = .{
             .addr = info.netmask,
         },
-    };
-    try doIoctl(fd, c.SIOCSIFNETMASK, @ptrToInt(&ifr));
+    }));
 
-    ifr = os.linux.ifreq{
+    try doIoctl(fd, c.SIOCSIFFLAGS, @ptrToInt(&os.linux.ifreq{
         .ifrn = .{
             .name = ifr_name,
         },
         .ifru = .{
             .flags = 1 | c.IFF_UP,
         },
-    };
-    try doIoctl(fd, c.SIOCSIFFLAGS, @ptrToInt(&ifr));
+    }));
 }
 
 fn doIoctl(fd: i32, flags: u16, addr: u64) Error!void {
     switch (os.errno(os.system.ioctl(fd, flags, addr))) {
         0 => return,
-        os.EBADF => unreachable,
-        os.EFAULT => unreachable,
-        os.EINVAL => unreachable,
-        os.ENOTTY => unreachable,
+        os.EBADF => return error.DeviceGone,
+        os.EFAULT => return error.IfConfig,
+        os.EINVAL => return error.IfConfig,
+        os.ENOTTY => return error.BadDevice,
         os.ENXIO => unreachable,
         os.EINTR => unreachable,
         os.EIO => unreachable,
