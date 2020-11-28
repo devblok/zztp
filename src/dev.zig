@@ -27,7 +27,7 @@ pub fn Device(
     comptime Context: type,
     comptime nameFn: fn (context: Context) []const u8,
     comptime getFd: fn (context: Context) i32,
-    comptime routeFn: fn (name: []const u8, info: IfRouteInfo) Error!void,
+    comptime ifcfgFn: fn (name: []const u8, info: IfConfigInfo) Error!void,
     comptime closeFn: fn (context: Context) void,
 ) type {
     return struct {
@@ -46,8 +46,8 @@ pub fn Device(
         }
 
         /// Route the device for the system.
-        pub fn route(self: Self, info: IfRouteInfo) Error!void {
-            return routeFn(nameFn(self.context), info);
+        pub fn ifcfg(self: Self, info: IfConfigInfo) Error!void {
+            return ifcfgFn(nameFn(self.context), info);
         }
 
         // Finalizes and closes the device, undoing all of it's configuration.
@@ -63,7 +63,7 @@ pub const TunDevice = struct {
 
     const Self = @This();
     const Reader = io.Reader(*Self, Error, read);
-    const Dev = Device(*Self, name, getFd, virtIfRoute, close);
+    const Dev = Device(*Self, name, getFd, virtifcfg, close);
 
     /// Creates, initializes and configures a virtual TUN device
     /// with a given name, clone file device descriptor, network,
@@ -139,13 +139,13 @@ pub const TunDevice = struct {
 };
 
 /// Contains all the nescesary information to configure a network interface.
-pub const IfRouteInfo = struct {
+pub const IfConfigInfo = struct {
     address: os.sockaddr,
     netmask: os.sockaddr,
 };
 
 /// Prototype for the device router.
-fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
+fn virtifcfg(name: []const u8, info: IfConfigInfo) Error!void {
     const flags = os.SOCK_DGRAM | os.SOCK_CLOEXEC | os.SOCK_NONBLOCK;
     const fd = os.socket(os.AF_INET, flags, 0) catch |err| {
         return error.GetInet;
@@ -162,19 +162,7 @@ fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
             .addr = info.address,
         },
     };
-
-    switch (os.errno(os.system.ioctl(fd, c.SIOCSIFADDR, @ptrToInt(&ifr)))) {
-        0 => {},
-        os.EBADF => unreachable,
-        os.EFAULT => unreachable,
-        os.EINVAL => unreachable,
-        os.ENOTTY => unreachable,
-        os.ENXIO => unreachable,
-        os.EINTR => unreachable,
-        os.EIO => unreachable,
-        os.ENODEV => unreachable,
-        else => return error.IfConfig,
-    }
+    try doIoctl(fd, c.SIOCSIFADDR, @ptrToInt(&ifr));
 
     ifr = os.linux.ifreq{
         .ifrn = .{
@@ -184,19 +172,7 @@ fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
             .addr = info.netmask,
         },
     };
-
-    switch (os.errno(os.system.ioctl(fd, c.SIOCSIFNETMASK, @ptrToInt(&ifr)))) {
-        0 => {},
-        os.EBADF => unreachable,
-        os.EFAULT => unreachable,
-        os.EINVAL => unreachable,
-        os.ENOTTY => unreachable,
-        os.ENXIO => unreachable,
-        os.EINTR => unreachable,
-        os.EIO => unreachable,
-        os.ENODEV => unreachable,
-        else => return error.IfConfig,
-    }
+    try doIoctl(fd, c.SIOCSIFNETMASK, @ptrToInt(&ifr));
 
     ifr = os.linux.ifreq{
         .ifrn = .{
@@ -206,9 +182,12 @@ fn virtIfRoute(name: []const u8, info: IfRouteInfo) Error!void {
             .flags = 1 | c.IFF_UP,
         },
     };
+    try doIoctl(fd, c.SIOCSIFFLAGS, @ptrToInt(&ifr));
+}
 
-    switch (os.errno(os.system.ioctl(fd, c.SIOCSIFFLAGS, @ptrToInt(&ifr)))) {
-        0 => {},
+fn doIoctl(fd: i32, flags: u16, addr: u64) Error!void {
+    switch (os.errno(os.system.ioctl(fd, flags, addr))) {
+        0 => return,
         os.EBADF => unreachable,
         os.EFAULT => unreachable,
         os.EINVAL => unreachable,

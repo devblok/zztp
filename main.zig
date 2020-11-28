@@ -41,12 +41,12 @@ pub fn main() !void {
 
     const netmask = try Address.parseIp("255.255.255.0", 0);
     const address = try Address.parseIp("172.1.0.1", 0);
-    const routeInfo = dev.IfRouteInfo{
+    const routeInfo = dev.IfConfigInfo{
         .address = address.any,
         .netmask = netmask.any,
     };
 
-    try fdev.device().route(routeInfo);
+    try fdev.device().ifcfg(routeInfo);
 
     var buf: [1024]u8 = undefined;
     while (true) {
