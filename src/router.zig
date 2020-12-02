@@ -3,6 +3,9 @@
 // This software is released under the MIT License.
 // https://opensource.org/licenses/MIT
 
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
 /// The definition on an IP packet header.
 pub const PacketHeader = packed struct {
     ver_and_ihl: u8,
@@ -16,7 +19,7 @@ pub const PacketHeader = packed struct {
     source: u32,
     destination: u32,
     options: u32,
-}
+};
 
 // What a router should do:
 // 1. Poll and wait for a file descriptor to be ready
@@ -29,10 +32,24 @@ pub const PacketHeader = packed struct {
 
 /// Implements the packet handling mechanism.
 pub const Router = struct {
+    allocator: *Allocator,
+    sockets: std.ArrayList(i32),
+
     const Self = @This();
 
     /// Starts processing the incoming packets and writing them.
     pub fn run(self: Self) !void {
-        return; 
+        return;
     }
-}
+
+    pub fn init(allocator: *Allocator) !Self {
+        return Self{
+            .allocator = allocator,
+            .sockets = std.ArrayList(i32).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: Self) void {
+        self.sockets.deinit();
+    }
+};

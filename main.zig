@@ -11,6 +11,7 @@ const math = std.math;
 const Address = std.net.Address;
 
 const dev = @import("./src/dev.zig");
+const router = @import("./src/router.zig");
 
 const clap = @import("./extern/zig-clap/clap.zig");
 
@@ -70,6 +71,10 @@ pub fn main() !void {
     };
 
     try fdev.device().ifcfg(routeInfo);
+
+    const allocator = std.heap.page_allocator;
+    const rt = try router.Router.init(allocator);
+    defer rt.deinit();
 
     var buf: [1024]u8 = undefined;
     while (true) {
