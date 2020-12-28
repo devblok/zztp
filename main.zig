@@ -73,7 +73,7 @@ pub fn main() !void {
     try fdev.device().ifcfg(routeInfo);
 
     const allocator = std.heap.page_allocator;
-    const rt = try router.Router.init(allocator, 10, 100);
+    var rt = try router.Router.init(allocator, 10, 100);
     defer rt.deinit();
 
     var buf: [1024]u8 = undefined;

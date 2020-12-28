@@ -31,9 +31,9 @@ pub const PacketHeader = packed struct {
 // 6. Repeat.
 // Misc. Allow insertion and deletion of clients from the loop
 
-const Error = error{Interrupted};
+const Error = error{ Interrupted, HandlerRead, Resources };
 
-pub const HandlerFn = fn () void;
+pub const HandlerFn = fn (fd: i32) Error!void;
 
 pub const Handler = struct {
     fd: i32,
@@ -48,23 +48,31 @@ pub const Router = struct {
 
     allocator: *Allocator,
     handlers_lock: std.Mutex,
-    handlers: std.AutoHashMap(i32, Handler),
+    handlers: HandlerMap,
 
     const Self = @This();
+    const HandlerMap = std.AutoHashMapUnmanaged(i32, Handler);
 
     /// Starts processing the incoming packets and writing them.
-    pub fn run(self: Self) !void {
-        const events = try self.allocator.alloc(os.epoll_event, self.max_concurrent);
+    pub fn run(self: *Self) Error!void {
+        const events = self.allocator.alloc(os.epoll_event, self.max_concurrent) catch return error.Resources;
         defer self.allocator.free(events);
 
-        try self.epoll_proc(events);
+        self.epollProc(events);
     }
 
-    pub fn register(self: Self, handler: Handler) !void {
+    pub fn register(self: *Self, handler: Handler) !void {
         const lock = self.handlers_lock.acquire();
         defer lock.release();
 
-        try self.handlers.put(handler.fd, handler);
+        try self.handlers.put(self.allocator, handler.fd, handler);
+    }
+
+    pub fn unregister(self: *Self, handler: Handler) void {
+        const lock = self.handlers_lock.acquire();
+        defer lock.release();
+
+        _ = self.handlers.remove(handler.fd);
     }
 
     pub fn init(allocator: *Allocator, max_concurrent: u32, epoll_timeout: i32) !Self {
@@ -73,43 +81,86 @@ pub const Router = struct {
             .epoll_timeout = epoll_timeout,
             .max_concurrent = max_concurrent,
             .allocator = allocator,
-            .handlers = std.AutoHashMap(i32, Handler).init(allocator),
+            .handlers = HandlerMap.init(allocator),
             .handlers_lock = std.Mutex{},
         };
     }
 
-    pub fn deinit(self: Self) void {
+    pub fn deinit(self: *Self) void {
         os.close(self.epoll_fd);
-        self.handlers.deinit();
+        self.handlers.deinit(self.allocator);
     }
 
-    fn epoll_proc(self: Self, events: []os.epoll_event) Error!void {
+    fn epollProc(self: *Self, e: []os.epoll_event) void {
         var ret: usize = 0;
-        while (ret >= 0) : (ret = os.epoll_wait(self.epoll_fd, events.ptr, events.len, self.epoll_timeout)) {
-            for (events[0..ret]) |event| {
-                const lock = self.handlers_lock.acquire();
-
-                if (self.handlers.get(event.fd)) |handler| {
-                    handler.func();
-                }
-
-                lock.release();
+        while (ret > 0) : (ret = os.epoll_wait(self.epoll_fd, e, self.epoll_timeout)) {
+            for (e[0..ret]) |event| {
+                self.execHandler(event);
             }
         }
-        return;
+    }
+
+    fn execHandler(self: *Self, event: os.epoll_event) void {
+        var handlerEntry: ?Handler = undefined;
+
+        if (self.handlers_lock.tryAcquire()) |lock| {
+            handlerEntry = self.handlers.get(event.data.fd);
+            lock.release();
+        }
+
+        if (handlerEntry) |handler| {
+            handler.func(event.data.fd) catch |err| {
+                switch (err) {
+                    error.HandlerRead => self.unregister(handler),
+                    error.Interrupted => unreachable,
+                    error.Resources => unreachable,
+                }
+            };
+        }
     }
 };
 
-fn print() !void {
-    std.debug.print("epoll handled\n", .{});
+const expect = std.testing.expect;
+
+fn assertHandler(fd: i32) Error!void {
+    var buf = [_]u8{0} ** 16;
+    const count = os.read(fd, buf[0..]) catch |err| return error.HandlerRead;
+    std.debug.print("epoll handled for {}: {} bytes read\nraw: {}\n", .{ fd, count, buf });
 }
 
-test "epoll detection" {
-    var router = Router.init(std.heap.page_allocator, 1, 100);
+test "epoll" {
+    var router = try Router.init(std.heap.page_allocator, 1, 100);
+    defer router.deinit();
+
     const pipes = try os.pipe();
+    defer os.close(pipes[0]);
+    defer os.close(pipes[1]);
 
     try router.register(.{
-        .fd = pipes[1],
-        .func = print,
+        .fd = pipes[0],
+        .func = assertHandler,
     });
+
+    var run = async router.run();
+
+    const written = try os.write(pipes[1], "hello world!");
+    expect(written == 12);
+
+    try await run;
+}
+
+test "self unregister on failed read" {
+    var router = try Router.init(std.heap.page_allocator, 1, 100);
+    defer router.deinit();
+
+    const pipes = try os.pipe();
+    defer os.close(pipes[0]);
+    defer os.close(pipes[1]);
+
+    try router.register(.{
+        .fd = 987,
+        .func = assertHandler,
+    });
+
+    // TODO complete test
 }
