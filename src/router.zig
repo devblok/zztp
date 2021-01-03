@@ -80,7 +80,8 @@ pub fn Router(comptime HandlerT: type) type {
         /// First, we insert the handler into the map, only later activating it via epoll.
         ///
         /// It accepts a handler and epoll flags that will influence the behaviour of signalling.
-        /// Leaving flags to zero will result in a correct default behaviour.
+        /// Leaving flags to zero will result in a correct default behaviour. Polling for write
+        /// availability is disallowed and will crash.
         pub fn register(self: *Self, handler: HandlerT, flags: u32) !void {
             // We do not want to poll for write availability.
             assert(flags & os.EPOLLOUT == 0);
@@ -88,7 +89,12 @@ pub fn Router(comptime HandlerT: type) type {
             const lock = self.handlers_lock.acquire();
             defer lock.release();
 
-            try self.handlers.put(self.allocator, handler.fd(), handler);
+            self.handlers.put(self.allocator, handler.fd(), handler) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => return error.Resources,
+                    else => return err,
+                }
+            };
 
             var ee = os.linux.epoll_event{
                 .events = flags | os.EPOLLIN,
@@ -160,10 +166,12 @@ pub fn Router(comptime HandlerT: type) type {
     };
 }
 
-const expect = std.testing.expect;
-const expectEqual = std.testing.expectEqual;
-const expectEqualStrings = std.testing.expectEqualStrings;
-const expectError = std.testing.expectError;
+const testing = std.testing;
+const expect = testing.expect;
+const expectEqual = testing.expectEqual;
+const expectEqualStrings = testing.expectEqualStrings;
+const expectError = testing.expectError;
+const FailingAllocator = testing.FailingAllocator;
 
 const MockHandler = struct {
     socket: i32,
@@ -254,4 +262,28 @@ test "self unregister on failed read" {
     // Expect unchanged values after self unregister.
     expectEqual(@intCast(i32, 1), mock.handle_count);
     expectEqual(@intCast(usize, 0), mock.last_byte_count);
+}
+
+test "no resources Router register" {
+    var allocator = FailingAllocator.init(std.heap.page_allocator, 0);
+    var router = try Router(MockHandler.HandlerType).init(&allocator.allocator, 1, 100);
+    defer router.deinit();
+
+    var mock = MockHandler.init(0, true);
+    expectError(error.Resources, router.register(mock.handler(), 0));
+}
+
+test "no resources Router run" {
+    var allocator = FailingAllocator.init(std.heap.page_allocator, 1);
+    var router = try Router(MockHandler.HandlerType).init(&allocator.allocator, 1, 100);
+    defer router.deinit();
+
+    const pipes = try os.pipe();
+    defer os.close(pipes[0]);
+    defer os.close(pipes[1]);
+
+    var mock = MockHandler.init(pipes[0], true);
+    try router.register(mock.handler(), 0);
+
+    expectError(error.Resources, router.run());
 }
