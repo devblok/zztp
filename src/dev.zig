@@ -118,26 +118,6 @@ pub const TunDevice = struct {
     fn close(self: *Self) void {
         self.file.close();
     }
-
-    ///============DEPRECATED PAST THIS POINT=============
-    pub fn reader(self: *Self) Reader {
-        return .{ .context = self };
-    }
-
-    fn read(self: *Self, buffer: []u8) Error!usize {
-        const count = self.file.read(buffer) catch |err| {
-            printf("Read error {}\n", .{err});
-            return Error.Read;
-        };
-        return count;
-    }
-
-    pub fn poll(self: *Self, timeout: i32) os.PollError!u64 {
-        var pollfd = [_]os.pollfd{
-            .{ .fd = self.file.handle, .events = os.POLLIN, .revents = 0 },
-        };
-        return os.poll(pollfd[0..], timeout);
-    }
 };
 
 /// Contains all the nescesary information to configure a network interface.
