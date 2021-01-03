@@ -73,32 +73,43 @@ pub fn main() !void {
     try fdev.device().ifcfg(routeInfo);
 
     const allocator = std.heap.page_allocator;
-    var rt = try router.Router(FakeHandler.Handler).init(allocator, 10, 100);
+    var rt = try router.Router(PrintingHandler.Type).init(allocator, 10, 100);
     defer rt.deinit();
 
-    var buf: [1024]u8 = undefined;
-    while (true) {
-        const poll = fdev.poll(500000) catch |err| {
-            printf("Poll err {}\n", .{err});
-            break;
-        };
-        printf("Poll {}\n", .{poll});
+    try rt.register(PrintingHandler.init(fdev.device().fd()).handler(), 0);
 
-        const count = fdev.reader().read(&buf) catch |err| {
-            printf("Read err {}\n", .{err});
-            break;
+    while (true) {
+        const run = rt.run() catch |err| {
+            switch (err) {
+                error.Interrupted => break,
+                else => {},
+            }
         };
-        printf("Read {} bytes: {}\n", .{ count, buf[0..count] });
     }
 }
 
-const FakeHandler = struct {
-    const Self = @This();
-    pub const Handler = router.Handler(*Self, handle, fd);
+const PrintingHandler = struct {
+    socket_fd: i32,
 
-    fn handle(self: *Self) router.Error!void {}
+    const Self = @This();
+    pub const Type = router.Handler(*Self, handle, fd);
+
+    pub fn init(socket_fd: i32) PrintingHandler {
+        return .{ .socket_fd = socket_fd };
+    }
+
+    pub fn handler(self: *Self) Type {
+        return .{ .context = self };
+    }
+
+    fn handle(self: *Self) router.Error!void {
+        var buf: [1024]u8 = undefined;
+        const count = os.read(self.socket_fd, buf[0..]) catch return error.HandlerRead;
+
+        printf("Read {} bytes: {}\n", .{ count, buf[0..count] });
+    }
 
     fn fd(self: *Self) i32 {
-        return 0;
+        return self.socket_fd;
     }
 };
