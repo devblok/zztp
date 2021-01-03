@@ -113,3 +113,47 @@ const PrintingHandler = struct {
         return self.socket_fd;
     }
 };
+
+/// Is a generic handler for source-destination sockets. It can work with any
+/// type of socket that read() and write() system calls apply to.
+const SocketHandler = struct {
+    src_sock: i32,
+    dst_sock: i32,
+
+    const Self = @This();
+
+    pub const Type = router.Handler(*Self, handle, fd);
+
+    pub fn init(src_sock: i32, dst_sock: i32) SocketHandler {
+        return .{
+            .src_sock = src_sock,
+            .dst_sock = dst_sock,
+        };
+    }
+
+    pub fn handler(self: *Self) Type {
+        return .{ .context = self };
+    }
+
+    /// Reads from a socket that has data available and immediately writes it out to destination.
+    fn handle(self: *Self) router.Error!void {
+        var buf: [1024 * 1024]u8 = undefined;
+        const read = os.read(self.src_sock, buf[0..]) catch return error.HandlerRead;
+
+        var written: usize = 0;
+        while (written < read) {
+            written += os.write(self.dst_sock, buf[written..read]) catch |err| {
+                // No error to deal with the write contingency, use HandlerRead for now.
+                switch (err) {
+                    error.AccessDenied => return error.HandlerRead,
+                    error.BrokenPipe => return error.HandlerRead,
+                    else => continue,
+                }
+            };
+        }
+    }
+
+    fn fd(self: *Self) i32 {
+        return self.src_sock;
+    }
+};
