@@ -73,7 +73,7 @@ pub fn main() !void {
     try fdev.device().ifcfg(routeInfo);
 
     const allocator = std.heap.page_allocator;
-    var rt = try router.Router.init(allocator, 10, 100);
+    var rt = try router.Router(FakeHandler.Handler).init(allocator, 10, 100);
     defer rt.deinit();
 
     var buf: [1024]u8 = undefined;
@@ -91,3 +91,14 @@ pub fn main() !void {
         printf("Read {} bytes: {}\n", .{ count, buf[0..count] });
     }
 }
+
+const FakeHandler = struct {
+    const Self = @This();
+    pub const Handler = router.Handler(*Self, handle, fd);
+
+    fn handle(self: *Self) router.Error!void {}
+
+    fn fd(self: *Self) i32 {
+        return 0;
+    }
+};
