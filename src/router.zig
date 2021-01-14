@@ -34,137 +34,125 @@ pub const PacketHeader = packed struct {
 
 pub const Error = error{ Interrupted, HandlerRead, Resources, NoHandler };
 
-pub fn Handler(
-    comptime Context: type,
-    comptime handleFn: fn (context: Context) Error!void,
-    comptime fdFn: fn (context: Context) i32,
-) type {
-    return struct {
-        context: Context,
+pub const Peer = struct {
+    socket: i32,
+    handleFn: fn (self: *Self) Error!void,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn handle(self: Self) Error!void {
-            return handleFn(self.context);
-        }
-
-        pub fn fd(self: Self) i32 {
-            return fdFn(self.context);
-        }
-    };
-}
+    pub fn handle(self: *Self) Error!void {
+        return self.handleFn(self);
+    }
+};
 
 /// Implements the packet handling mechanism.
-pub fn Router(comptime HandlerT: type) type {
-    return struct {
-        epoll_fd: i32,
-        epoll_timeout: i32,
-        max_concurrent: u32,
+pub const Router = struct {
+    epoll_fd: i32,
+    epoll_timeout: i32,
+    max_concurrent: u32,
 
-        allocator: *Allocator,
-        handlers_lock: std.Mutex,
-        handlers: HandlerMap,
+    allocator: *Allocator,
+    peers_lock: std.Mutex,
+    peers: PeerMap,
 
-        const Self = @This();
-        const HandlerMap = std.AutoHashMapUnmanaged(i32, HandlerT);
+    const Self = @This();
+    const PeerMap = std.AutoHashMapUnmanaged(i32, *Peer);
 
-        /// Starts processing the incoming packets and writing them.
-        pub fn run(self: *Self) Error!void {
-            const events = self.allocator.alloc(os.epoll_event, self.max_concurrent) catch return error.Resources;
-            defer self.allocator.free(events);
+    /// Starts processing the incoming packets and writing them. Will exit after a configured timeout,
+    /// so it must be continously run in a loop with quick successions with optional status checking before etc.
+    pub fn run(self: *Self) Error!void {
+        const events = self.allocator.alloc(os.epoll_event, self.max_concurrent) catch return error.Resources;
+        defer self.allocator.free(events);
 
-            try self.epollProc(events);
+        try self.epollProc(events);
+    }
+
+    /// Register a handler so that it could start participating in the routing process.
+    /// First, we insert the handler into the map, only later activating it via epoll.
+    ///
+    /// It accepts a handler and epoll flags that will influence the behaviour of signalling.
+    /// Leaving flags to zero will result in a correct default behaviour. Polling for write
+    /// availability is disallowed and will crash.
+    pub fn register(self: *Self, peer: *Peer, flags: u32) !void {
+        // We do not want to poll for write availability.
+        assert(flags & os.EPOLLOUT == 0);
+
+        const lock = self.peers_lock.acquire();
+        defer lock.release();
+
+        self.peers.put(self.allocator, peer.socket, peer) catch |err| {
+            switch (err) {
+                error.OutOfMemory => return error.Resources,
+                else => return err,
+            }
+        };
+
+        var ee = os.linux.epoll_event{
+            .events = flags | os.EPOLLIN,
+            .data = .{ .fd = peer.socket },
+        };
+        try os.epoll_ctl(self.epoll_fd, os.EPOLL_CTL_ADD, peer.socket, &ee);
+    }
+
+    /// Removes the handler from routing. It's first disabled via epoll, to prevent
+    /// the routing process from trying to access it. Only then it is removed from the map.
+    pub fn unregister(self: *Self, peer: *Peer) void {
+        const lock = self.peers_lock.acquire();
+        defer lock.release();
+
+        os.epoll_ctl(self.epoll_fd, os.EPOLL_CTL_DEL, peer.socket, null) catch {};
+        _ = self.peers.remove(peer.socket);
+    }
+
+    pub fn init(allocator: *Allocator, max_concurrent: u32, epoll_timeout: i32) !Self {
+        return Self{
+            .epoll_fd = try os.epoll_create1(0),
+            .epoll_timeout = epoll_timeout,
+            .max_concurrent = max_concurrent,
+            .allocator = allocator,
+            .peers = PeerMap.init(allocator),
+            .peers_lock = std.Mutex{},
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        os.close(self.epoll_fd);
+        self.peers.deinit(self.allocator);
+    }
+
+    fn epollProc(self: *Self, e: []os.epoll_event) Error!void {
+        var ret: usize = 0;
+        var first: bool = true;
+        while (ret > 0 or first) : (ret = os.epoll_wait(self.epoll_fd, e, self.epoll_timeout)) {
+            for (e[0..ret]) |event| {
+                try self.execHandler(event);
+            }
+            first = false;
+        }
+    }
+
+    fn execHandler(self: *Self, event: os.epoll_event) Error!void {
+        var peerEntry: ?*Peer = undefined;
+
+        if (self.peers_lock.tryAcquire()) |lock| {
+            peerEntry = self.peers.get(event.data.fd);
+            lock.release();
         }
 
-        /// Register a handler so that it could start participating in the routing process.
-        /// First, we insert the handler into the map, only later activating it via epoll.
-        ///
-        /// It accepts a handler and epoll flags that will influence the behaviour of signalling.
-        /// Leaving flags to zero will result in a correct default behaviour. Polling for write
-        /// availability is disallowed and will crash.
-        pub fn register(self: *Self, handler: HandlerT, flags: u32) !void {
-            // We do not want to poll for write availability.
-            assert(flags & os.EPOLLOUT == 0);
-
-            const lock = self.handlers_lock.acquire();
-            defer lock.release();
-
-            self.handlers.put(self.allocator, handler.fd(), handler) catch |err| {
+        if (peerEntry) |peer| {
+            peer.handle() catch |err| {
                 switch (err) {
-                    error.OutOfMemory => return error.Resources,
-                    else => return err,
+                    error.HandlerRead => self.unregister(peer),
+                    error.Interrupted => unreachable,
+                    error.Resources => unreachable,
+                    error.NoHandler => unreachable,
                 }
             };
-
-            var ee = os.linux.epoll_event{
-                .events = flags | os.EPOLLIN,
-                .data = .{
-                    .fd = handler.fd(),
-                },
-            };
-            try os.epoll_ctl(self.epoll_fd, os.EPOLL_CTL_ADD, handler.fd(), &ee);
+        } else {
+            return error.NoHandler;
         }
-
-        /// Removes the handler from routing. It's first disabled via epoll, to prevent
-        /// the routing process from trying to access it. Only then it is removed from the map.
-        pub fn unregister(self: *Self, handler: HandlerT) void {
-            const lock = self.handlers_lock.acquire();
-            defer lock.release();
-
-            os.epoll_ctl(self.epoll_fd, os.EPOLL_CTL_DEL, handler.fd(), null) catch {};
-            _ = self.handlers.remove(handler.fd());
-        }
-
-        pub fn init(allocator: *Allocator, max_concurrent: u32, epoll_timeout: i32) !Self {
-            return Self{
-                .epoll_fd = try os.epoll_create1(0),
-                .epoll_timeout = epoll_timeout,
-                .max_concurrent = max_concurrent,
-                .allocator = allocator,
-                .handlers = HandlerMap.init(allocator),
-                .handlers_lock = std.Mutex{},
-            };
-        }
-
-        pub fn deinit(self: *Self) void {
-            os.close(self.epoll_fd);
-            self.handlers.deinit(self.allocator);
-        }
-
-        fn epollProc(self: *Self, e: []os.epoll_event) Error!void {
-            var ret: usize = 0;
-            var first: bool = true;
-            while (ret > 0 or first) : (ret = os.epoll_wait(self.epoll_fd, e, self.epoll_timeout)) {
-                for (e[0..ret]) |event| {
-                    try self.execHandler(event);
-                }
-                first = false;
-            }
-        }
-
-        fn execHandler(self: *Self, event: os.epoll_event) Error!void {
-            var handlerEntry: ?HandlerT = undefined;
-
-            if (self.handlers_lock.tryAcquire()) |lock| {
-                handlerEntry = self.handlers.get(event.data.fd);
-                lock.release();
-            }
-
-            if (handlerEntry) |handler| {
-                handler.handle() catch |err| {
-                    switch (err) {
-                        error.HandlerRead => self.unregister(handler),
-                        error.Interrupted => unreachable,
-                        error.Resources => unreachable,
-                        error.NoHandler => unreachable,
-                    }
-                };
-            } else {
-                return error.NoHandler;
-            }
-        }
-    };
-}
+    }
+};
 
 const testing = std.testing;
 const expect = testing.expect;
@@ -173,56 +161,51 @@ const expectEqualStrings = testing.expectEqualStrings;
 const expectError = testing.expectError;
 const FailingAllocator = testing.FailingAllocator;
 
-const MockHandler = struct {
-    socket: i32,
+const MockPeer = struct {
     ret_error: bool,
     handle_count: i32,
     last_byte_count: usize,
     last_content: [128:0]u8,
+    peer: Peer,
 
     const Self = @This();
 
-    pub const HandlerType = Handler(*Self, handle, fd);
-
     pub fn init(socket: i32, ret_error: bool) Self {
         return .{
-            .socket = socket,
             .ret_error = ret_error,
             .handle_count = 0,
             .last_byte_count = 0,
             .last_content = [_:0]u8{0} ** 128,
+            .peer = .{
+                .socket = socket,
+                .handleFn = handle,
+            },
         };
     }
 
-    pub fn handler(self: *Self) HandlerType {
-        return .{ .context = self };
-    }
+    fn handle(peer: *Peer) Error!void {
+        const self = @fieldParentPtr(Self, "peer", peer);
 
-    fn handle(self: *Self) Error!void {
         self.handle_count += 1;
 
         if (self.ret_error) {
             return error.HandlerRead;
         }
 
-        self.last_byte_count = os.read(self.socket, self.last_content[0..]) catch |err| return error.HandlerRead;
-    }
-
-    fn fd(self: *Self) i32 {
-        return self.socket;
+        self.last_byte_count = os.read(peer.socket, self.last_content[0..]) catch |err| return error.HandlerRead;
     }
 };
 
 test "epoll" {
-    var router = try Router(MockHandler.HandlerType).init(std.heap.page_allocator, 1, 100);
+    var router = try Router.init(std.heap.page_allocator, 1, 100);
     defer router.deinit();
 
     const pipes = try os.pipe();
     defer os.close(pipes[0]);
     defer os.close(pipes[1]);
 
-    var mock = MockHandler.init(pipes[0], false);
-    try router.register(mock.handler(), 0);
+    var mock = MockPeer.init(pipes[0], false);
+    try router.register(&mock.peer, 0);
 
     const written = try os.write(pipes[1], "hello world!");
     expectEqual(@intCast(usize, 12), written);
@@ -235,15 +218,15 @@ test "epoll" {
 }
 
 test "self unregister on failed read" {
-    var router = try Router(MockHandler.HandlerType).init(std.heap.page_allocator, 1, 100);
+    var router = try Router.init(std.heap.page_allocator, 1, 100);
     defer router.deinit();
 
     const pipes = try os.pipe();
     defer os.close(pipes[0]);
     defer os.close(pipes[1]);
 
-    var mock = MockHandler.init(pipes[0], true);
-    try router.register(mock.handler(), 0);
+    var mock = MockPeer.init(pipes[0], true);
+    try router.register(&mock.peer, 0);
 
     var written = try os.write(pipes[1], "hello world!");
     expectEqual(@intCast(usize, 12), written);
@@ -266,24 +249,24 @@ test "self unregister on failed read" {
 
 test "no resources Router register" {
     var allocator = FailingAllocator.init(std.heap.page_allocator, 0);
-    var router = try Router(MockHandler.HandlerType).init(&allocator.allocator, 1, 100);
+    var router = try Router.init(&allocator.allocator, 1, 100);
     defer router.deinit();
 
-    var mock = MockHandler.init(0, true);
-    expectError(error.Resources, router.register(mock.handler(), 0));
+    var mock = MockPeer.init(0, true);
+    expectError(error.Resources, router.register(&mock.peer, 0));
 }
 
 test "no resources Router run" {
     var allocator = FailingAllocator.init(std.heap.page_allocator, 1);
-    var router = try Router(MockHandler.HandlerType).init(&allocator.allocator, 1, 100);
+    var router = try Router.init(&allocator.allocator, 1, 100);
     defer router.deinit();
 
     const pipes = try os.pipe();
     defer os.close(pipes[0]);
     defer os.close(pipes[1]);
 
-    var mock = MockHandler.init(pipes[0], true);
-    try router.register(mock.handler(), 0);
+    var mock = MockPeer.init(pipes[0], true);
+    try router.register(&mock.peer, 0);
 
     expectError(error.Resources, router.run());
 }

@@ -73,10 +73,11 @@ pub fn main() !void {
     try fdev.device().ifcfg(routeInfo);
 
     const allocator = std.heap.page_allocator;
-    var rt = try router.Router(PrintingHandler.Type).init(allocator, 10, 100);
+    var rt = try router.Router.init(allocator, 10, 100);
     defer rt.deinit();
 
-    try rt.register(PrintingHandler.init(fdev.device().fd()).handler(), 0);
+    var printingPeer = PrintingPeer.init(fdev.device().fd());
+    try rt.register(&printingPeer.peer, 0);
 
     while (true) {
         const run = rt.run() catch |err| {
@@ -88,57 +89,48 @@ pub fn main() !void {
     }
 }
 
-const PrintingHandler = struct {
-    socket_fd: i32,
+const PrintingPeer = struct {
+    peer: router.Peer,
 
     const Self = @This();
-    pub const Type = router.Handler(*Self, handle, fd);
 
-    pub fn init(socket_fd: i32) PrintingHandler {
-        return .{ .socket_fd = socket_fd };
+    pub fn init(socket_fd: i32) PrintingPeer {
+        return .{
+            .peer = .{ .socket = socket_fd, .handleFn = handle },
+        };
     }
 
-    pub fn handler(self: *Self) Type {
-        return .{ .context = self };
-    }
+    fn handle(peer: *router.Peer) router.Error!void {
+        const self = @fieldParentPtr(Self, "peer", peer);
 
-    fn handle(self: *Self) router.Error!void {
         var buf: [1024]u8 = undefined;
-        const count = os.read(self.socket_fd, buf[0..]) catch return error.HandlerRead;
+        const count = os.read(peer.socket, buf[0..]) catch return error.HandlerRead;
 
         printf("Read {} bytes: {}\n", .{ count, buf[0..count] });
-    }
-
-    fn fd(self: *Self) i32 {
-        return self.socket_fd;
     }
 };
 
 /// Is a generic handler for source-destination sockets. It can work with any
 /// type of socket that read() and write() system calls apply to.
-const SocketHandler = struct {
+const SocketPeer = struct {
     src_sock: i32,
     dst_sock: i32,
+    peer: router.Peer,
 
     const Self = @This();
 
-    pub const Type = router.Handler(*Self, handle, fd);
-
-    pub fn init(src_sock: i32, dst_sock: i32) SocketHandler {
+    pub fn init(src_sock: i32, dst_sock: i32) SocketPeer {
         return .{
             .src_sock = src_sock,
             .dst_sock = dst_sock,
+            .peer = .{ .socket = src_sock, .handleFn = handle },
         };
     }
 
-    pub fn handler(self: *Self) Type {
-        return .{ .context = self };
-    }
-
     /// Reads from a socket that has data available and immediately writes it out to destination.
-    fn handle(self: *Self) router.Error!void {
+    fn handle(peer: *router.Peer) router.Error!void {
         var buf: [1024 * 1024]u8 = undefined;
-        const read = os.read(self.src_sock, buf[0..]) catch return error.HandlerRead;
+        const read = os.read(peer.socket, buf[0..]) catch return error.HandlerRead;
 
         var written: usize = 0;
         while (written < read) {
@@ -151,9 +143,5 @@ const SocketHandler = struct {
                 }
             };
         }
-    }
-
-    fn fd(self: *Self) i32 {
-        return self.src_sock;
     }
 };
