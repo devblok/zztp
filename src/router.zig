@@ -6,22 +6,8 @@
 const std = @import("std");
 const os = std.os;
 const assert = std.debug.assert;
+const Address = std.net.Address;
 const Allocator = std.mem.Allocator;
-
-/// The definition on an IP packet header.
-pub const PacketHeader = packed struct {
-    ver_and_ihl: u8,
-    tos: u8,
-    length: u16,
-    identification: u16,
-    flags_and_frag_offset: u16,
-    ttl: u8,
-    proto: u8,
-    crc: u16,
-    source: u32,
-    destination: u32,
-    options: u32,
-};
 
 // What a router should do:
 // 1. Poll and wait for a file descriptor to be ready
@@ -34,14 +20,39 @@ pub const PacketHeader = packed struct {
 
 pub const Error = error{ Interrupted, HandlerRead, Resources, NoHandler };
 
+/// The definition for the router function that finds the destination
+/// socket from a given Address structure.
+pub const GetSock = fn (Address) Error!i32;
+
+/// A representation of a Router peer.
 pub const Peer = struct {
     socket: i32,
-    handleFn: fn (self: *Self) Error!void,
+    address: Address,
+    handleFn: fn (self: *Self, map: *AddressMap) Error!void,
 
     const Self = @This();
 
-    pub fn handle(self: *Self) Error!void {
-        return self.handleFn(self);
+    pub fn handle(self: *Self, map: *AddressMap) Error!void {
+        return self.handleFn(self, map);
+    }
+};
+
+pub const AddressMap = struct {
+    map: MapType,
+    lock: std.Mutex,
+
+    const Self = @This();
+    const MapType = std.AutoHashMapUnmanaged([50]u8, i32);
+
+    pub fn init(allocator: *Allocator) AddressMap {
+        return .{
+            .map = MapType.init(allocator),
+            .lock = .{},
+        };
+    }
+
+    pub fn deinit(self: *Self, allocator: *Allocator) void {
+        self.map.deinit(allocator);
     }
 };
 
@@ -54,6 +65,8 @@ pub const Router = struct {
     allocator: *Allocator,
     peers_lock: std.Mutex,
     peers: PeerMap,
+
+    addresses: AddressMap,
 
     const Self = @This();
     const PeerMap = std.AutoHashMapUnmanaged(i32, *Peer);
@@ -112,12 +125,14 @@ pub const Router = struct {
             .allocator = allocator,
             .peers = PeerMap.init(allocator),
             .peers_lock = std.Mutex{},
+            .addresses = AddressMap.init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
         os.close(self.epoll_fd);
         self.peers.deinit(self.allocator);
+        self.addresses.deinit(self.allocator);
     }
 
     fn epollProc(self: *Self, e: []os.epoll_event) Error!void {
@@ -140,7 +155,7 @@ pub const Router = struct {
         }
 
         if (peerEntry) |peer| {
-            peer.handle() catch |err| {
+            peer.handle(&self.addresses) catch |err| {
                 switch (err) {
                     error.HandlerRead => self.unregister(peer),
                     error.Interrupted => unreachable,
@@ -170,13 +185,14 @@ const MockPeer = struct {
 
     const Self = @This();
 
-    pub fn init(socket: i32, ret_error: bool) Self {
+    pub fn init(socket: i32, addr: Address, ret_error: bool) Self {
         return .{
             .ret_error = ret_error,
             .handle_count = 0,
             .last_byte_count = 0,
             .last_content = [_:0]u8{0} ** 128,
             .peer = .{
+                .address = addr,
                 .socket = socket,
                 .handleFn = handle,
             },
@@ -204,7 +220,9 @@ test "epoll" {
     defer os.close(pipes[0]);
     defer os.close(pipes[1]);
 
-    var mock = MockPeer.init(pipes[0], false);
+    const address = try Address.parseIp4("172.1.0.1", 0);
+
+    var mock = MockPeer.init(pipes[0], address, false);
     try router.register(&mock.peer, 0);
 
     const written = try os.write(pipes[1], "hello world!");
@@ -225,7 +243,9 @@ test "self unregister on failed read" {
     defer os.close(pipes[0]);
     defer os.close(pipes[1]);
 
-    var mock = MockPeer.init(pipes[0], true);
+    const address = try Address.parseIp4("172.1.0.1", 0);
+
+    var mock = MockPeer.init(pipes[0], address, true);
     try router.register(&mock.peer, 0);
 
     var written = try os.write(pipes[1], "hello world!");
@@ -252,7 +272,9 @@ test "no resources Router register" {
     var router = try Router.init(&allocator.allocator, 1, 100);
     defer router.deinit();
 
-    var mock = MockPeer.init(0, true);
+    const address = try Address.parseIp4("172.1.0.1", 0);
+
+    var mock = MockPeer.init(0, address, true);
     expectError(error.Resources, router.register(&mock.peer, 0));
 }
 
@@ -265,7 +287,9 @@ test "no resources Router run" {
     defer os.close(pipes[0]);
     defer os.close(pipes[1]);
 
-    var mock = MockPeer.init(pipes[0], true);
+    const address = try Address.parseIp4("172.1.0.1", 0);
+
+    var mock = MockPeer.init(pipes[0], address, true);
     try router.register(&mock.peer, 0);
 
     expectError(error.Resources, router.run());

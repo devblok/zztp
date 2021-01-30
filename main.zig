@@ -7,6 +7,7 @@ const std = @import("std");
 const printf = std.debug.print;
 const fs = std.fs;
 const os = std.os;
+const net = std.net;
 const math = std.math;
 const Address = std.net.Address;
 
@@ -96,11 +97,15 @@ const PrintingPeer = struct {
 
     pub fn init(socket_fd: i32) PrintingPeer {
         return .{
-            .peer = .{ .socket = socket_fd, .handleFn = handle },
+            .peer = .{
+                .socket = socket_fd,
+                .handleFn = handle,
+                .address = net.Address.parseIp4("0.0.0.0", 0) catch unreachable,
+            },
         };
     }
 
-    fn handle(peer: *router.Peer) router.Error!void {
+    fn handle(peer: *router.Peer, map: *router.AddressMap) router.Error!void {
         const self = @fieldParentPtr(Self, "peer", peer);
 
         var buf: [1024]u8 = undefined;
@@ -110,27 +115,47 @@ const PrintingPeer = struct {
     }
 };
 
+/// The definition on an IP packet header.
+pub const IP4Hdr = packed struct {
+    version: u4,
+    internet_header_length: u4,
+    type_of_service: u8,
+    total_length: u16,
+    identification: u16,
+    flags: u4,
+    frag_offset: u12,
+    time_to_live: u8,
+    protocol: u8,
+    checksum: u16,
+    source: [4]u8,
+    destination: [4]u8,
+};
+
 /// Is a generic handler for source-destination sockets. It can work with any
 /// type of socket that read() and write() system calls apply to.
-const SocketPeer = struct {
+const L3Peer = struct {
     src_sock: i32,
-    dst_sock: i32,
+    bufsize: i32,
     peer: router.Peer,
 
     const Self = @This();
 
-    pub fn init(src_sock: i32, dst_sock: i32) SocketPeer {
+    pub fn init(comptime bufsize: i32, src_sock: i32) SocketPeer {
         return .{
             .src_sock = src_sock,
-            .dst_sock = dst_sock,
+            .bufsize = bufsize,
             .peer = .{ .socket = src_sock, .handleFn = handle },
         };
     }
 
     /// Reads from a socket that has data available and immediately writes it out to destination.
-    fn handle(peer: *router.Peer) router.Error!void {
-        var buf: [1024 * 1024]u8 = undefined;
+    fn handle(peer: *router.Peer, map: *router.AddressMap) router.Error!void {
+        const self = @fieldParentPtr(*L3Peer, "peer", peer);
+
+        var buf: [self.bufsize]u8 = undefined;
         const read = os.read(peer.socket, buf[0..]) catch return error.HandlerRead;
+
+        const dest = self.parseDest(buf[0..read]);
 
         var written: usize = 0;
         while (written < read) {
@@ -143,5 +168,9 @@ const SocketPeer = struct {
                 }
             };
         }
+    }
+
+    fn parseDest(self: *Self, buffer: []u8) net.Address {
+        return net.Address.parseIp4("0.0.0.0", 0) catch unreachable;
     }
 };
