@@ -199,7 +199,7 @@ const MockPeer = struct {
         };
     }
 
-    fn handle(peer: *Peer) Error!void {
+    fn handle(peer: *Peer, map: *AddressMap) Error!void {
         const self = @fieldParentPtr(Self, "peer", peer);
 
         self.handle_count += 1;
