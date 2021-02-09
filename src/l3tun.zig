@@ -7,6 +7,7 @@ const std = @import("std");
 const os = std.os;
 const net = std.net;
 const print = std.debug.print;
+const Address = net.Address;
 
 const router = @import("./router.zig");
 
@@ -29,14 +30,12 @@ pub const IP4Hdr = packed struct {
 /// Is a generic handler for source-destination sockets. It can work with any
 /// type of socket that read() and write() system calls apply to. Works for a TUN interface.
 const L3Peer = struct {
-    src_sock: i32,
     peer: router.Peer,
 
     const Self = @This();
 
     pub fn init(src_sock: i32) Self {
         return .{
-            .src_sock = src_sock,
             .peer = .{
                 .socket = src_sock,
                 .address = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0),
@@ -53,7 +52,7 @@ const L3Peer = struct {
         const read = os.read(peer.socket, buf[0..]) catch return error.HandlerRead;
 
         const dest = self.parseDest(buf[0..read]);
-        if (map.map.get([_]u8{ '0', '.', '0', '.', '0', '.', '0' } ++ [_]u8{0} ** 43)) |dst_sock| {
+        if (map.map.get(Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0).any)) |dst_sock| {
             var written: usize = 0;
             while (written < read) {
                 written += os.write(dst_sock, buf[written..read]) catch |err| {
@@ -87,13 +86,17 @@ test "writes data" {
     var map = router.AddressMap.init(allocator);
     defer map.deinit(allocator);
 
-    var arr = [_]u8{ '0', '.', '0', '.', '0', '.', '0' } ++ [_]u8{0} ** 43;
-    try map.map.put(allocator, arr, outPipes[1]);
+    var addr = Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0);
+    try map.map.put(allocator, addr.any, outPipes[1]);
+
+    var inbuf: [100]u8 = undefined;
+    const bytesWritten = try os.write(inPipes[1], inbuf[0..]);
+    print("{} bytes written\n", .{bytesWritten});
 
     var peer = L3Peer.init(inPipes[0]);
     try peer.peer.handle(&map);
 
-    var buf: [100]u8 = undefined;
-    const bytesRead = try os.read(outPipes[0], buf[0..]);
+    var outbuf: [100]u8 = undefined;
+    const bytesRead = try os.read(outPipes[0], outbuf[0..]);
     print("{} bytes read\n", .{bytesRead});
 }

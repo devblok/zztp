@@ -6,6 +6,7 @@
 const std = @import("std");
 const os = std.os;
 const assert = std.debug.assert;
+const sockaddr = std.c.sockaddr;
 const Address = std.net.Address;
 const Allocator = std.mem.Allocator;
 
@@ -42,7 +43,7 @@ pub const AddressMap = struct {
     lock: std.Mutex,
 
     const Self = @This();
-    const MapType = std.AutoHashMapUnmanaged([50]u8, i32);
+    const MapType = std.AutoHashMapUnmanaged(sockaddr, i32);
 
     pub fn init(allocator: *Allocator) AddressMap {
         return .{
