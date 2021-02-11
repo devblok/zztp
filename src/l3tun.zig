@@ -72,6 +72,10 @@ const L3Peer = struct {
     }
 };
 
+const testing = std.testing;
+const expect = testing.expect;
+const mem = std.mem;
+
 test "writes data" {
     const allocator = std.heap.page_allocator;
 
@@ -99,4 +103,26 @@ test "writes data" {
     var outbuf: [100]u8 = undefined;
     const bytesRead = try os.read(outPipes[0], outbuf[0..]);
     print("{} bytes read\n", .{bytesRead});
+}
+
+test "parses IP header" {
+    var data = [_]u8{
+        0x45, // ver + hdr
+        0x00, // dcsp + ecn
+        0x00, 0x19, // total len
+        0x10, 0x10, // id
+        0x40, 0x00, // flags + frag offset
+        0x40, // ttl
+        0x06, // protocol
+        0x7c, 0x2c, // crc
+        192, 168, 1, 1, // src
+        172, 168, 2,   32, // dst
+        'H', 'e', 'l', 'l',
+        'o',
+    };
+
+    const hdr = @ptrCast(*IP4Hdr, &data);
+
+    const want = [4]u8{ 172, 168, 2, 32 };
+    expect(mem.eql(u8, hdr.destination[0..], want[0..]));
 }
