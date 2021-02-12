@@ -7,6 +7,7 @@ const std = @import("std");
 const os = std.os;
 const net = std.net;
 const print = std.debug.print;
+const builtin = std.builtin;
 const Address = net.Address;
 
 const router = @import("./router.zig");
@@ -48,27 +49,43 @@ const L3Peer = struct {
     fn handle(peer: *router.Peer, map: *router.AddressMap) router.Error!void {
         const self = @fieldParentPtr(L3Peer, "peer", peer);
 
-        var buf: [100]u8 = undefined;
+        var buf: [65536]u8 = undefined;
         const read = os.read(peer.socket, buf[0..]) catch return error.HandlerRead;
 
-        const dest = self.parseDest(buf[0..read]);
-        if (map.map.get(Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0).any)) |dst_sock| {
-            var written: usize = 0;
-            while (written < read) {
-                written += os.write(dst_sock, buf[written..read]) catch |err| {
-                    // No error to deal with the write contingency, use HandlerRead for now.
-                    switch (err) {
-                        error.AccessDenied => return error.HandlerRead,
-                        error.BrokenPipe => return error.HandlerRead,
-                        else => continue,
-                    }
-                };
-            }
+        const packet = isolatePacket(buf[0..read]);
+
+        var dst_sock: ?i32 = undefined;
+        if (map.lock.tryAcquire()) |lock| {
+            dst_sock = map.map.get(packet.dst.any);
+            lock.release();
+        }
+
+        if (dst_sock) |sock| {
+            try writePacket(sock, packet.buf);
         }
     }
 
-    fn parseDest(self: *Self, buffer: []u8) net.Address {
-        return net.Address.parseIp4("0.0.0.0", 0) catch unreachable;
+    fn isolatePacket(buffer: []u8) struct { buf: []u8, dst: Address } {
+        const hdr = @ptrCast(*IP4Hdr, buffer.ptr);
+        const length = mem.toNative(u16, hdr.total_length, builtin.Endian.Big);
+        return .{
+            .buf = buffer[0..length],
+            .dst = Address.initIp4(hdr.destination, 0),
+        };
+    }
+
+    fn writePacket(sock: i32, packet: []u8) router.Error!void {
+        var written: usize = 0;
+        while (written < packet.len) {
+            written += os.write(sock, packet[written..packet.len]) catch |err| {
+                // No error to deal with the write contingency, use HandlerRead for now.
+                switch (err) {
+                    error.AccessDenied => return error.HandlerRead,
+                    error.BrokenPipe => return error.HandlerRead,
+                    else => continue,
+                }
+            };
+        }
     }
 };
 
@@ -76,7 +93,21 @@ const testing = std.testing;
 const expect = testing.expect;
 const mem = std.mem;
 
-test "writes data" {
+test "routes packet" {
+    var data = [_]u8{
+        0x45, // ver + hdr
+        0x00, // dcsp + ecn
+        0x00, 0x19, // total len
+        0x10, 0x10, // id
+        0x40, 0x00, // flags + frag offset
+        0x40, // ttl
+        0x06, // protocol
+        0x7c, 0x2c, // crc
+        192, 168, 1, 1, // src
+        172, 168, 2, 32, // dst
+        'H', 'e', 'l', 'l', 'o', // data
+    };
+
     const allocator = std.heap.page_allocator;
 
     const inPipes = try os.pipe();
@@ -90,22 +121,22 @@ test "writes data" {
     var map = router.AddressMap.init(allocator);
     defer map.deinit(allocator);
 
-    var addr = Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0);
+    var addr = Address.initIp4([4]u8{ 172, 168, 2, 32 }, 0);
     try map.map.put(allocator, addr.any, outPipes[1]);
 
-    var inbuf: [100]u8 = undefined;
-    const bytesWritten = try os.write(inPipes[1], inbuf[0..]);
-    print("{} bytes written\n", .{bytesWritten});
+    const bytesWritten = try os.write(inPipes[1], data[0..]);
+    expect(bytesWritten == 25);
 
     var peer = L3Peer.init(inPipes[0]);
     try peer.peer.handle(&map);
 
     var outbuf: [100]u8 = undefined;
     const bytesRead = try os.read(outPipes[0], outbuf[0..]);
-    print("{} bytes read\n", .{bytesRead});
+
+    expect(bytesRead == 25);
 }
 
-test "parses IP header" {
+test "IP header parses" {
     var data = [_]u8{
         0x45, // ver + hdr
         0x00, // dcsp + ecn
@@ -117,7 +148,7 @@ test "parses IP header" {
         0x7c, 0x2c, // crc
         192, 168, 1, 1, // src
         172, 168, 2,   32, // dst
-        'H', 'e', 'l', 'l',
+        'h', 'e', 'l', 'l',
         'o',
     };
 

@@ -91,15 +91,16 @@ pub const Router = struct {
         // We do not want to poll for write availability.
         assert(flags & os.EPOLLOUT == 0);
 
-        const lock = self.peers_lock.acquire();
-        defer lock.release();
-
-        self.peers.put(self.allocator, peer.socket, peer) catch |err| {
-            switch (err) {
-                error.OutOfMemory => return error.Resources,
-                else => return err,
-            }
-        };
+        if (self.peers_lock.tryAcquire()) |lock| {
+            self.peers.put(self.allocator, peer.socket, peer) catch |err| {
+                lock.release();
+                switch (err) {
+                    error.OutOfMemory => return error.Resources,
+                    else => return err,
+                }
+            };
+            lock.release();
+        }
 
         var ee = os.linux.epoll_event{
             .events = flags | os.EPOLLIN,
@@ -111,11 +112,12 @@ pub const Router = struct {
     /// Removes the handler from routing. It's first disabled via epoll, to prevent
     /// the routing process from trying to access it. Only then it is removed from the map.
     pub fn unregister(self: *Self, peer: *Peer) void {
-        const lock = self.peers_lock.acquire();
-        defer lock.release();
-
         os.epoll_ctl(self.epoll_fd, os.EPOLL_CTL_DEL, peer.socket, null) catch {};
-        _ = self.peers.remove(peer.socket);
+
+        if (self.peers_lock.tryAcquire()) |lock| {
+            _ = self.peers.remove(peer.socket);
+            lock.release();
+        }
     }
 
     pub fn init(allocator: *Allocator, max_concurrent: u32, epoll_timeout: i32) !Self {
