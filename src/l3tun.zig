@@ -30,13 +30,17 @@ pub const IP4Hdr = packed struct {
 
 /// Is a generic handler for source-destination sockets. It can work with any
 /// type of socket that read() and write() system calls apply to. Works for a TUN interface.
-const L3Peer = struct {
+pub const L3Peer = struct {
     peer: router.Peer,
+    buffer: []u8,
 
     const Self = @This();
 
-    pub fn init(src_sock: i32) Self {
+    /// Initializes the peer with a given socket and a buffer for operating on
+    /// socket handling.
+    pub fn init(src_sock: i32, buf: []u8) Self {
         return .{
+            .buffer = buf,
             .peer = .{
                 .socket = src_sock,
                 .address = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, 0),
@@ -49,10 +53,8 @@ const L3Peer = struct {
     fn handle(peer: *router.Peer, map: *router.AddressMap) router.Error!void {
         const self = @fieldParentPtr(L3Peer, "peer", peer);
 
-        var buf: [65536]u8 = undefined;
-        const read = os.read(peer.socket, buf[0..]) catch return error.HandlerRead;
-
-        const packet = isolatePacket(buf[0..read]);
+        const read = os.read(peer.socket, self.buffer) catch return error.HandlerRead;
+        const packet = isolatePacket(self.buffer[0..read]);
 
         var dst_sock: ?i32 = undefined;
         if (map.lock.tryAcquire()) |lock| {
@@ -127,7 +129,8 @@ test "routes packet" {
     const bytesWritten = try os.write(inPipes[1], data[0..]);
     expect(bytesWritten == 25);
 
-    var peer = L3Peer.init(inPipes[0]);
+    var buffer: [100]u8 = undefined;
+    var peer = L3Peer.init(inPipes[0], buffer[0..]);
     try peer.peer.handle(&map);
 
     var outbuf: [100]u8 = undefined;
