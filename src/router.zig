@@ -102,6 +102,17 @@ pub const Router = struct {
             lock.release();
         }
 
+        if (self.addresses.lock.tryAcquire()) |lock| {
+            self.addresses.map.put(self.allocator, peer.address.any, peer.socket) catch |err| {
+                lock.release();
+                switch (err) {
+                    error.OutOfMemory => return error.Resources,
+                    else => return err,
+                }
+            };
+            lock.release();
+        }
+
         var ee = os.linux.epoll_event{
             .events = flags | os.EPOLLIN,
             .data = .{ .fd = peer.socket },
@@ -113,6 +124,11 @@ pub const Router = struct {
     /// the routing process from trying to access it. Only then it is removed from the map.
     pub fn unregister(self: *Self, peer: *Peer) void {
         os.epoll_ctl(self.epoll_fd, os.EPOLL_CTL_DEL, peer.socket, null) catch {};
+
+        if (self.addresses.lock.tryAcquire()) |lock| {
+            _ = self.addresses.map.remove(peer.address.any);
+            lock.release();
+        }
 
         if (self.peers_lock.tryAcquire()) |lock| {
             _ = self.peers.remove(peer.socket);
@@ -134,8 +150,8 @@ pub const Router = struct {
 
     pub fn deinit(self: *Self) void {
         os.close(self.epoll_fd);
-        self.peers.deinit(self.allocator);
         self.addresses.deinit(self.allocator);
+        self.peers.deinit(self.allocator);
     }
 
     fn epollProc(self: *Self, e: []os.epoll_event) Error!void {
@@ -282,7 +298,7 @@ test "no resources Router register" {
 }
 
 test "no resources Router run" {
-    var allocator = FailingAllocator.init(std.heap.page_allocator, 1);
+    var allocator = FailingAllocator.init(std.heap.page_allocator, 2);
     var router = try Router.init(&allocator.allocator, 1, 100);
     defer router.deinit();
 
