@@ -105,13 +105,15 @@ pub fn main() !void {
     var p = l3tun.L3Peer.init(fdev.device().fd(), buf[0..]);
     try rt.register(&p.peer, 0);
 
-    var run = async routerRun(&rt);
-    serverListen(allocator, portArg, &rt) catch |err| printf("Error {}\n", .{err});
-    try await run;
+    var listen = async serverListen(allocator, portArg, &rt);
+    printf("router running\n", .{});
+    try routerRun(&rt);
+    try await listen;
 }
 
 fn routerRun(r: *router.Router) !void {
     while (true) {
+        printf("router run\n", .{});
         r.run() catch |err| {
             switch (err) {
                 error.Interrupted => return err,
@@ -140,6 +142,7 @@ fn serverListen(allocator: *Allocator, port: u16, r: *router.Router) !void {
     }
 
     while (true) {
+        printf("server listening\n", .{});
         const conn = try server.accept();
 
         var p = l3tun.L3Peer.init(conn.file.handle, try allocator.alloc(u8, 65536));
@@ -147,6 +150,7 @@ fn serverListen(allocator: *Allocator, port: u16, r: *router.Router) !void {
 
         try r.register(&p.peer, 0);
     }
+    printf("server exiting\n");
 }
 
 const PrintingPeer = struct {

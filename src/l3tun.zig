@@ -12,6 +12,8 @@ const Address = net.Address;
 
 const router = @import("./router.zig");
 
+const Error = error{UnknownPacket};
+
 /// The definition on an IP packet header.
 pub const IP4Hdr = packed struct {
     version: u4,
@@ -36,6 +38,11 @@ pub const L3Peer = struct {
 
     const Self = @This();
 
+    const Packet = struct {
+        buf: []u8,
+        dst: Address,
+    };
+
     /// Initializes the peer with a given socket and a buffer for operating on
     /// socket handling.
     pub fn init(src_sock: i32, buf: []u8) Self {
@@ -54,7 +61,12 @@ pub const L3Peer = struct {
         const self = @fieldParentPtr(L3Peer, "peer", peer);
 
         const read = os.read(peer.socket, self.buffer) catch return error.HandlerRead;
-        const packet = isolatePacket(self.buffer[0..read]);
+        const packet = isolatePacket(self.buffer[0..read]) catch |err| {
+            switch (err) {
+                error.UnknownPacket => return,
+                else => return error.HandlerRead,
+            }
+        };
 
         var dst_sock: ?i32 = undefined;
         if (map.lock.tryAcquire()) |lock| {
@@ -67,10 +79,13 @@ pub const L3Peer = struct {
         }
     }
 
-    fn isolatePacket(buffer: []u8) struct { buf: []u8, dst: Address } {
+    fn isolatePacket(buffer: []u8) Error!Packet {
         const hdr = @ptrCast(*IP4Hdr, buffer.ptr);
+
+        if (hdr.version != 4) return error.UnknownPacket;
+
         const length = mem.toNative(u16, hdr.total_length, builtin.Endian.Big);
-        return .{
+        return Packet{
             .buf = buffer[0..length],
             .dst = Address.initIp4(hdr.destination, 0),
         };
